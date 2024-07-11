@@ -18,7 +18,13 @@ public static class EnumSourceGenerator
     private const string IS_DEFINED_METHOD_NAME = nameof(Enum.IsDefined);
     private const string GET_NAME_METHOD_NAME = "GetName";
     private const string GET_DESCRIPTION_METHOD_NAME = "GetDescription";
+    private const string PARSE_FROM_DESCRIPTION_METHOD_NAME = "ParseFromDescription";
+    private const string PARSE_FROM_NAME_METHOD_NAME = "ParseFromName";
+    private const string TRY_PARSE_FROM_DESCRIPTION_METHOD_NAME = "TryParseFromDescription";
+    private const string TRY_PARSE_FROM_NAME_METHOD_NAME = "TryParseFromName";
     private const string INVALID_ENUM_MEMBER_METHOD_NAME = "ThrowInvalidEnumMemberException";
+    private const string INVALID_PARSE_ENUM_MEMBER_METHOD_NAME = "ThrowInvalidParseEnumMemberException";
+    private const string INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME = "ThrowInvalidTryParseEnumMemberException";
 
     public static string GenerateClassForEnum(in EnumGeneration enumDeclaration, out CodeBuilder source)
     {
@@ -105,7 +111,19 @@ public static class EnumSourceGenerator
         source.AppendBlankLine();
         GenerateIsDefined(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
         source.AppendBlankLine();
+        GenerateParseFromName(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
+        GenerateParseFromDescription(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
+        GenerateTryParseFromName(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
+        GenerateTryParseFromDescription(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
         GenerateThrowNotFound(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
+        GenerateThrowNotFoundParser(source: source, enumDeclaration: attribute, classNameFormatter: classNameFormatter);
+        source.AppendBlankLine();
+        GenerateThrowNotFoundTryParser(source: source, enumDeclaration: attribute);
     }
 
     private static void GenerateThrowNotFound(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
@@ -132,6 +150,61 @@ public static class EnumSourceGenerator
                 source.AppendLine("#endif");
             }
         }
+    }
+
+    private static void GenerateThrowNotFoundParser(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    {
+        string className = classNameFormatter(enumDeclaration);
+
+        if (enumDeclaration.Options.HasDoesNotReturnAttribute)
+        {
+            source.AppendLine("[DoesNotReturn]");
+        }
+
+        using (source.StartBlock("public static " + className + " " + INVALID_PARSE_ENUM_MEMBER_METHOD_NAME + "(string value)"))
+        {
+            if (enumDeclaration.Options.SupportsUnreachableException)
+            {
+                IssueUnreachableException(source: source, enumDeclaration: enumDeclaration);
+            }
+            else
+            {
+                source.AppendLine("#if NET7_0_OR_GREATER");
+                IssueUnreachableException(source: source, enumDeclaration: enumDeclaration);
+                source.AppendLine("#else");
+                IssueArgumentOutOfRangeExceptionParser(source, enumDeclaration: enumDeclaration);
+                source.AppendLine("#endif");
+            }
+        }
+    }
+
+    private static void GenerateThrowNotFoundTryParser(CodeBuilder source, in EnumGeneration enumDeclaration)
+    {
+        if (enumDeclaration.Options.HasDoesNotReturnAttribute)
+        {
+            source.AppendLine("[DoesNotReturn]");
+        }
+
+        using (source.StartBlock("public static bool " + INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME + "(string value)"))
+        {
+            if (enumDeclaration.Options.SupportsUnreachableException)
+            {
+                IssueUnreachableException(source: source, enumDeclaration: enumDeclaration);
+            }
+            else
+            {
+                source.AppendLine("#if NET7_0_OR_GREATER");
+                IssueUnreachableException(source: source, enumDeclaration: enumDeclaration);
+                source.AppendLine("#else");
+                IssueArgumentOutOfRangeExceptionParser(source, enumDeclaration: enumDeclaration);
+                source.AppendLine("#endif");
+            }
+        }
+    }
+
+    private static void IssueArgumentOutOfRangeExceptionParser(CodeBuilder source, in EnumGeneration enumDeclaration)
+    {
+        source.AppendLine("throw new ArgumentOutOfRangeException(\"" + enumDeclaration.Name + "\", actualValue: value, message: \"Unknown enum member\");");
     }
 
     private static void IssueArgumentOutOfRangeException(CodeBuilder source)
@@ -229,7 +302,7 @@ public static class EnumSourceGenerator
         using (source.AppendLine("[MethodImpl(MethodImplOptions.AggressiveInlining)]")
                      .StartBlock("public static string " + GET_DESCRIPTION_METHOD_NAME + "(this " + className + " value)"))
         {
-            IReadOnlyList<string> items = GetDescriptionCaseOptions(enumDeclaration: enumDeclaration, classNameFormatter: classNameFormatter);
+            IReadOnlyList<string> items = GetDescriptionCaseOptions(enumDeclaration: enumDeclaration, classNameFormatter: classNameFormatter, formatter: FormatEnumToDescription);
 
             if (items.Count == 0)
             {
@@ -250,7 +323,11 @@ public static class EnumSourceGenerator
         }
     }
 
-    private static IReadOnlyList<string> GetDescriptionCaseOptions(EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    
+    private static IReadOnlyList<string> GetDescriptionCaseOptions(
+        EnumGeneration enumDeclaration, 
+        Func<EnumGeneration, string> classNameFormatter,
+        Func<EnumGeneration, Func<EnumGeneration, string>, IFieldSymbol, string, string> formatter)
     {
         HashSet<string> names = UniqueEnumMemberNames(enumDeclaration);
 
@@ -262,10 +339,10 @@ public static class EnumSourceGenerator
                               .Select(item => (item.member, typedConstant: item.description.ConstructorArguments.FirstOrDefault()))
                               .Select(item => (item.member, attributeText: ((TypedConstant?)item.typedConstant).Value.ToCSharpString()))
                               .Where(item => !string.IsNullOrWhiteSpace(item.attributeText))
-                              .Select(item => FormatMember(enumDeclaration: enumDeclaration,
-                                                           classNameFormatter: classNameFormatter,
-                                                           member: item.member,
-                                                           attributeText: item.attributeText))
+                              .Select(item => formatter(enumDeclaration,
+                                                        classNameFormatter,
+                                                        item.member,
+                                                        item.attributeText))
                               .ToArray();
 
         static (IFieldSymbol member, AttributeData description) EnsureNotNullDescription((IFieldSymbol member, AttributeData? description) item)
@@ -275,7 +352,7 @@ public static class EnumSourceGenerator
         }
     }
 
-    private static string FormatMember(in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter, IFieldSymbol member, string attributeText)
+    private static string FormatEnumToDescription(EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter, IFieldSymbol member, string attributeText)
     {
         return classNameFormatter(enumDeclaration) + "." + member.Name + " => " + attributeText + ",";
     }
@@ -315,6 +392,122 @@ public static class EnumSourceGenerator
         }
 
         return !names.Add(cv.ToString());
+    }
+
+    private static void GenerateTryParseFromName(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    {
+        string className = classNameFormatter(enumDeclaration);
+
+        using (source.AppendLine("[MethodImpl(MethodImplOptions.AggressiveInlining)]")
+                     .StartBlock("public static bool " + TRY_PARSE_FROM_NAME_METHOD_NAME + "(string value, out " + className + " result)"))
+        {
+            IReadOnlyList<string> members = GetUniqueMemberNames(enumDeclaration);
+
+            if (members.Count == 0)
+            {
+                source.AppendLine("return " + INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value);");
+            }
+            else
+            {
+                using (source.StartBlock(text: "return value switch", start: "{", end: "};"))
+                {
+                    members.Aggregate(seed: source,
+                                      func: (current, memberName) => current.AppendLine("nameof(" + className + "." + memberName + ") => (result = " + className + "." + memberName + ") == " + className + "." + memberName  + ","))
+                           .AppendLine("_ => (result = default) == default && " + INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value)");
+                }
+            }
+        }
+    }
+
+    private static void GenerateTryParseFromDescription(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    {
+        string className = classNameFormatter(enumDeclaration);
+
+        using (source.AppendLine("[MethodImpl(MethodImplOptions.AggressiveInlining)]")
+                     .StartBlock("public static bool " + TRY_PARSE_FROM_DESCRIPTION_METHOD_NAME + "(string value, out " + className + " result)"))
+        {
+            IReadOnlyList<string> items = GetDescriptionCaseOptions(enumDeclaration: enumDeclaration, classNameFormatter: classNameFormatter, formatter: FormatTryParse);
+
+            if (items.Count == 0)
+            {
+                source.AppendLine("return " + TRY_PARSE_FROM_NAME_METHOD_NAME + "(value, out var result2) ? (result = result2) == result2 : (result = default) == default && " + INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value);");
+            }
+            else
+            {
+                using (source.StartBlock(text: "return value switch", start: "{", end: "};"))
+                {
+                    foreach (string line in items)
+                    {
+                        source.AppendLine(line);
+                    }
+
+                    source.AppendLine("_ => " + TRY_PARSE_FROM_NAME_METHOD_NAME + "(value, out var result2) ? (result = result2) == result2 : (result = default) == default && " + INVALID_TRY_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value)");
+                }
+            }
+        }
+    }
+
+    private static string FormatTryParse(EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter, IFieldSymbol member, string attributeText)
+    {
+        return attributeText + " => (result = " + classNameFormatter(enumDeclaration) + "." + member.Name + ") == " + classNameFormatter(enumDeclaration) + "." + member.Name + ",";
+    }
+
+    private static void GenerateParseFromName(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    {
+        string className = classNameFormatter(enumDeclaration);
+
+        using (source.AppendLine("[MethodImpl(MethodImplOptions.AggressiveInlining)]")
+                     .StartBlock("public static " + className + " " + PARSE_FROM_NAME_METHOD_NAME + "(string value)"))
+        {
+            IReadOnlyList<string> members = GetUniqueMemberNames(enumDeclaration);
+
+            if (members.Count == 0)
+            {
+                source.AppendLine("return " + INVALID_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value);");
+            }
+            else
+            {
+                using (source.StartBlock(text: "return value switch", start: "{", end: "};"))
+                {
+                    members.Aggregate(seed: source,
+                                      func: (current, memberName) => current.AppendLine("nameof(" + className + "." + memberName + ") => " + className + "." + memberName + ","))
+                           .AppendLine("_ => " + INVALID_PARSE_ENUM_MEMBER_METHOD_NAME + "(value: value)");
+                }
+            }
+        }
+    }
+
+    private static void GenerateParseFromDescription(CodeBuilder source, in EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter)
+    {
+        string className = classNameFormatter(enumDeclaration);
+
+        using (source.AppendLine("[MethodImpl(MethodImplOptions.AggressiveInlining)]")
+                     .StartBlock("public static " + className + " " + PARSE_FROM_DESCRIPTION_METHOD_NAME + "(string value)"))
+        {
+            IReadOnlyList<string> items = GetDescriptionCaseOptions(enumDeclaration: enumDeclaration, classNameFormatter: classNameFormatter, formatter: FormatMemberToParse);
+
+            if (items.Count == 0)
+            {
+                source.AppendLine("return " + PARSE_FROM_NAME_METHOD_NAME + "(value);");
+            }
+            else
+            {
+                using (source.StartBlock(text: "return value switch", start: "{", end: "};"))
+                {
+                    foreach (string line in items)
+                    {
+                        source.AppendLine(line);
+                    }
+
+                    source.AppendLine("_ => " + PARSE_FROM_NAME_METHOD_NAME + "(value)");
+                }
+            }
+        }
+    }
+
+    private static string FormatMemberToParse(EnumGeneration enumDeclaration, Func<EnumGeneration, string> classNameFormatter, IFieldSymbol member, string attributeText)
+    {
+        return attributeText + " => " + classNameFormatter(enumDeclaration) + "." + member.Name + ",";
     }
 
     private static EnumMemberDeclarationSyntax? FindEnumMemberDeclarationSyntax(ISymbol member)
